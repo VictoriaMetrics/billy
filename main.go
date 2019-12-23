@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
 	"runtime"
@@ -23,6 +24,7 @@ var (
 	workers      = flag.Int("workers", runtime.GOMAXPROCS(-1), "the number of concurrent workers used for data ingestion")
 	sink         = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink")
 	compress     = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
+	digits       = flag.Int("digits", 5, "The number of decimal digits after the point in the generated temperature")
 )
 
 func main() {
@@ -129,15 +131,23 @@ func worker(workCh <-chan work) {
 
 func writeSeries(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startTimestamp int64) {
 	min := 68 + r.ExpFloat64()/3.0
+	e := math.Pow10(*digits)
 	fmt.Fprintf(bw, `{"metric":{"__name__":"temperature","sensor_id":"%d"},"values":[`, sensorID)
 	for i := 0; i < rowsCount-1; i++ {
-		fmt.Fprintf(bw, "%g,", float32(r.ExpFloat64()/1.5+min))
+		t := generateTemperature(r, min, e)
+		fmt.Fprintf(bw, "%g,", t)
 	}
-	fmt.Fprintf(bw, `%g],"timestamps":[`, float32(r.ExpFloat64()/1.5+min))
+	t := generateTemperature(r, min, e)
+	fmt.Fprintf(bw, `%g],"timestamps":[`, t)
 	for i := 0; i < rowsCount-1; i++ {
 		fmt.Fprintf(bw, "%d,", startTimestamp+int64(i)*60*1000)
 	}
 	fmt.Fprintf(bw, "%d]}\n", startTimestamp+int64(rowsCount-1)*60*1000)
+}
+
+func generateTemperature(r *rand.Rand, min, e float64) float64 {
+	t := r.ExpFloat64()/1.5 + min
+	return math.Round(t*e) / e
 }
 
 func mustParseDate(dateStr, flagName string) int64 {
