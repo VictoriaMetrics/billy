@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ var (
 	endKey       = flag.Int("endkey", 2, "last sensor ID")
 	workers      = flag.Int("workers", runtime.GOMAXPROCS(-1), "the number of concurrent workers used for data ingestion")
 	sink         = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink")
+	compress     = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
 )
 
 func main() {
@@ -90,6 +92,15 @@ func worker(workCh <-chan work) {
 	if err != nil {
 		log.Fatalf("cannot create request to %q: %s", *sink, err)
 	}
+	w := io.Writer(pw)
+	if *compress {
+		zw, err := gzip.NewWriterLevel(pw, 1)
+		if err != nil {
+			log.Fatalf("unexpected error when creating gzip writer: %s", err)
+		}
+		w = zw
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -102,13 +113,16 @@ func worker(workCh <-chan work) {
 			log.Fatalf("unexpected response code from %q: %s", *sink, err)
 		}
 	}()
-	bw := bufio.NewWriterSize(pw, 16*1024)
+	bw := bufio.NewWriterSize(w, 16*1024)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for w := range workCh {
 		writeSeries(bw, r, w.key, w.rowsCount, w.startTimestamp)
 		atomic.AddUint64(&rowsGenerated, uint64(w.rowsCount))
 	}
 	_ = bw.Flush()
+	if *compress {
+		_ = w.(*gzip.Writer).Close()
+	}
 	_ = pw.Close()
 	wg.Wait()
 }
