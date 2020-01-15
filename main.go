@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -133,16 +134,23 @@ func writeSeries(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startT
 	min := 68 + r.ExpFloat64()/3.0
 	e := math.Pow10(*digits)
 	fmt.Fprintf(bw, `{"metric":{"__name__":"temperature","sensor_id":"%d"},"values":[`, sensorID)
-	for i := 0; i < rowsCount-1; i++ {
-		t := generateTemperature(r, min, e)
-		fmt.Fprintf(bw, "%g,", t)
-	}
+	var buf []byte
 	t := generateTemperature(r, min, e)
-	fmt.Fprintf(bw, `%g],"timestamps":[`, t)
 	for i := 0; i < rowsCount-1; i++ {
-		fmt.Fprintf(bw, "%d,", startTimestamp+int64(i)*60*1000)
+		buf = strconv.AppendFloat(buf[:0], t, 'f', *digits, 64)
+		buf = append(buf, ',')
+		bw.Write(buf)
+		t = generateTemperature(r, min, e)
 	}
-	fmt.Fprintf(bw, "%d]}\n", startTimestamp+int64(rowsCount-1)*60*1000)
+	fmt.Fprintf(bw, `%.*f],"timestamps":[`, *digits, t)
+	timestamp := startTimestamp
+	for i := 0; i < rowsCount-1; i++ {
+		buf = strconv.AppendInt(buf[:0], timestamp, 10)
+		buf = append(buf, ',')
+		bw.Write(buf)
+		timestamp = startTimestamp + int64(i+1)*60*1000
+	}
+	fmt.Fprintf(bw, "%d]}\n", timestamp)
 }
 
 func generateTemperature(r *rand.Rand, min, e float64) float64 {
