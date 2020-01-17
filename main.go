@@ -19,14 +19,15 @@ import (
 )
 
 var (
-	startDateStr = flag.String("startdate", "2019-01-01", "date to start sweep YYYY-MM-DD")
-	endDateStr   = flag.String("enddate", "2019-01-31", "date to end sweep YYYY-MM-DD")
-	startKey     = flag.Int("startkey", 1, "first sensor ID")
-	endKey       = flag.Int("endkey", 2, "last sensor ID")
-	workers      = flag.Int("workers", runtime.GOMAXPROCS(-1), "the number of concurrent workers used for data ingestion")
-	sink         = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink")
-	compress     = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
-	digits       = flag.Int("digits", 2, "The number of decimal digits after the point in the generated temperature. The original benchmark from ScyllaDB uses 2 decimal digits after the point. See query results at https://www.scylladb.com/2019/12/12/how-scylla-scaled-to-one-billion-rows-a-second/")
+	startDateStr   = flag.String("startdate", "2019-01-01", "Date to start sweep YYYY-MM-DD")
+	endDateStr     = flag.String("enddate", "2019-01-31", "Date to end sweep YYYY-MM-DD")
+	startKey       = flag.Int("startkey", 1, "First sensor ID")
+	endKey         = flag.Int("endkey", 2, "Last sensor ID")
+	workers        = flag.Int("workers", runtime.GOMAXPROCS(-1), "The number of concurrent workers used for data ingestion")
+	sink           = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink")
+	compress       = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
+	digits         = flag.Int("digits", 2, "The number of decimal digits after the point in the generated temperature. The original benchmark from ScyllaDB uses 2 decimal digits after the point. See query results at https://www.scylladb.com/2019/12/12/how-scylla-scaled-to-one-billion-rows-a-second/")
+	reportInterval = flag.Duration("report-interval", 10*time.Second, "Stats reporting interval")
 )
 
 func main() {
@@ -76,11 +77,18 @@ var rowsGenerated uint64
 var startTime time.Time
 
 func statsReporter() {
-	for {
-		time.Sleep(10 * time.Second)
-		d := time.Since(startTime).Seconds()
-		n := atomic.LoadUint64(&rowsGenerated)
-		log.Printf("generated %d out of %d rows at %.0f rows/sec", n, rowsTotal, float64(n)/d)
+	prevTime := time.Now()
+	nPrev := uint64(0)
+	ticker := time.NewTicker(*reportInterval)
+	for t := range ticker.C {
+		dAll := t.Sub(startTime).Seconds()
+		dLast := t.Sub(prevTime).Seconds()
+		nAll := atomic.LoadUint64(&rowsGenerated)
+		nLast := nAll - nPrev
+		log.Printf("generated %d out of %d rows at %.0f rows/sec; instant speed %.0f rows/sec",
+			nAll, rowsTotal, float64(nAll)/dAll, float64(nLast)/dLast)
+		prevTime = t
+		nPrev = nAll
 	}
 }
 
