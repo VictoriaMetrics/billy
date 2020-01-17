@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"compress/gzip"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/klauspost/compress/gzip"
 )
 
 var (
