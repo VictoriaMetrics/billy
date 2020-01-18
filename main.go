@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"math/rand"
@@ -24,10 +25,11 @@ var (
 	startKey       = flag.Int("startkey", 1, "First sensor ID")
 	endKey         = flag.Int("endkey", 2, "Last sensor ID")
 	workers        = flag.Int("workers", runtime.GOMAXPROCS(-1), "The number of concurrent workers used for data ingestion")
-	sink           = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink")
+	sink           = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink. It depends on the `-format`")
 	compress       = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
 	digits         = flag.Int("digits", 2, "The number of decimal digits after the point in the generated temperature. The original benchmark from ScyllaDB uses 2 decimal digits after the point. See query results at https://www.scylladb.com/2019/12/12/how-scylla-scaled-to-one-billion-rows-a-second/")
 	reportInterval = flag.Duration("report-interval", 10*time.Second, "Stats reporting interval")
+	format         = flag.String("format", "vmimport", "Data ingestion format. Supported values: vmimport, influx")
 )
 
 func main() {
@@ -122,13 +124,25 @@ func worker(workCh <-chan work) {
 			log.Fatalf("unexpected error when performing request to %q: %s", *sink, err)
 		}
 		if resp.StatusCode != http.StatusNoContent {
-			log.Fatalf("unexpected response code from %q: %s", *sink, err)
+			log.Printf("unexpected response code from %q: %d", *sink, resp.StatusCode)
+			data, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				log.Fatalf("cannot read response body: %s", err)
+			}
+			log.Fatalf("response body:\n%s", data)
 		}
 	}()
 	bw := bufio.NewWriterSize(w, 16*1024)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for w := range workCh {
-		writeSeries(bw, r, w.key, w.rowsCount, w.startTimestamp)
+		switch *format {
+		case "vmimport":
+			writeSeriesVMImport(bw, r, w.key, w.rowsCount, w.startTimestamp)
+		case "influx":
+			writeSeriesInflux(bw, r, w.key, w.rowsCount, w.startTimestamp)
+		default:
+			log.Fatalf("unexpected `-format=%q`. Supported values: vmimport, influx", *format)
+		}
 		atomic.AddUint64(&rowsGenerated, uint64(w.rowsCount))
 	}
 	_ = bw.Flush()
@@ -139,7 +153,7 @@ func worker(workCh <-chan work) {
 	wg.Wait()
 }
 
-func writeSeries(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startTimestamp int64) {
+func writeSeriesVMImport(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startTimestamp int64) {
 	min := 68 + r.ExpFloat64()/3.0
 	e := math.Pow10(*digits)
 	fmt.Fprintf(bw, `{"metric":{"__name__":"temperature","sensor_id":"%d"},"values":[`, sensorID)
@@ -160,6 +174,22 @@ func writeSeries(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startT
 		timestamp = startTimestamp + int64(i+1)*60*1000
 	}
 	fmt.Fprintf(bw, "%d]}\n", timestamp)
+}
+
+func writeSeriesInflux(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, startTimestamp int64) {
+	min := 68 + r.ExpFloat64()/3.0
+	e := math.Pow10(*digits)
+	var buf []byte
+	for i := 0; i < rowsCount; i++ {
+		t := generateTemperature(r, min, e)
+		timestamp := (startTimestamp + int64(i+1)*60*1000) * 1e6
+		buf = append(buf[:0], "temperature value="...)
+		buf = strconv.AppendFloat(buf, t, 'f', *digits, 64)
+		buf = append(buf, ' ')
+		buf = strconv.AppendInt(buf, timestamp, 10)
+		buf = append(buf, '\n')
+		bw.Write(buf)
+	}
 }
 
 func generateTemperature(r *rand.Rand, min, e float64) float64 {
