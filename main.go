@@ -20,16 +20,18 @@ import (
 )
 
 var (
-	startDateStr   = flag.String("startdate", "2019-01-01", "Date to start sweep YYYY-MM-DD")
-	endDateStr     = flag.String("enddate", "2019-01-31", "Date to end sweep YYYY-MM-DD")
-	startKey       = flag.Int("startkey", 1, "First sensor ID")
-	endKey         = flag.Int("endkey", 2, "Last sensor ID")
-	workers        = flag.Int("workers", runtime.GOMAXPROCS(-1), "The number of concurrent workers used for data ingestion")
-	sink           = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink. It depends on the `-format`")
-	compress       = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
-	digits         = flag.Int("digits", 2, "The number of decimal digits after the point in the generated temperature. The original benchmark from ScyllaDB uses 2 decimal digits after the point. See query results at https://www.scylladb.com/2019/12/12/how-scylla-scaled-to-one-billion-rows-a-second/")
-	reportInterval = flag.Duration("report-interval", 10*time.Second, "Stats reporting interval")
-	format         = flag.String("format", "vmimport", "Data ingestion format. Supported values: vmimport, influx")
+	startDateStr     = flag.String("startdate", "2019-01-01", "Date to start sweep YYYY-MM-DD")
+	endDateStr       = flag.String("enddate", "2019-01-31", "Date to end sweep YYYY-MM-DD")
+	startKey         = flag.Int("startkey", 1, "First sensor ID")
+	endKey           = flag.Int("endkey", 2, "Last sensor ID")
+	workers          = flag.Int("workers", runtime.GOMAXPROCS(-1), "The number of concurrent workers used for data ingestion")
+	sink             = flag.String("sink", "http://localhost:8428/api/v1/import", "HTTP address for the data ingestion sink. It depends on the `-format`")
+	compress         = flag.Bool("compress", false, "Whether to compress data before sending it to sink. This saves network bandwidth at the cost of higher CPU usage")
+	digits           = flag.Int("digits", 2, "The number of decimal digits after the point in the generated temperature. The original benchmark from ScyllaDB uses 2 decimal digits after the point. See query results at https://www.scylladb.com/2019/12/12/how-scylla-scaled-to-one-billion-rows-a-second/")
+	reportInterval   = flag.Duration("report-interval", 10*time.Second, "Stats reporting interval")
+	format           = flag.String("format", "vmimport", "Data ingestion format. Supported values: vmimport, influx")
+	blocksPerRequest = flag.Int("blocks-per-request", 0, "The maximum number of blocks per request. Unlimited if set to 0. "+
+		"This can be used for ingesting data into InfluxDB, which doesn't support request body streaming")
 )
 
 func main() {
@@ -47,15 +49,21 @@ func main() {
 	}
 
 	workCh := make(chan work)
-	var wg sync.WaitGroup
+	var workersWg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
-		wg.Add(1)
+		workersWg.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workersWg.Done()
 			worker(workCh)
 		}()
 	}
-	go statsReporter()
+	statsReporterStopCh := make(chan struct{})
+	var statsReporterWG sync.WaitGroup
+	statsReporterWG.Add(1)
+	go func() {
+		defer statsReporterWG.Done()
+		statsReporter(statsReporterStopCh)
+	}()
 	keysCount := *endKey - *startKey + 1
 	startTime = time.Now()
 	rowsTotal = rowsCount * keysCount
@@ -71,24 +79,34 @@ func main() {
 		startTimestamp += 24 * 3600 * 1000
 	}
 	close(workCh)
-	wg.Wait()
+	workersWg.Wait()
+
+	close(statsReporterStopCh)
+	statsReporterWG.Wait()
 }
 
 var rowsTotal int
 var rowsGenerated uint64
 var startTime time.Time
 
-func statsReporter() {
+func statsReporter(stopCh <-chan struct{}) {
 	prevTime := time.Now()
 	nPrev := uint64(0)
 	ticker := time.NewTicker(*reportInterval)
-	for t := range ticker.C {
+	mustStop := false
+	for !mustStop {
+		select {
+		case <-ticker.C:
+		case <-stopCh:
+			mustStop = true
+		}
+		t := time.Now()
 		dAll := t.Sub(startTime).Seconds()
 		dLast := t.Sub(prevTime).Seconds()
 		nAll := atomic.LoadUint64(&rowsGenerated)
 		nLast := nAll - nPrev
-		log.Printf("generated %d out of %d rows at %.0f rows/sec; instant speed %.0f rows/sec",
-			nAll, rowsTotal, float64(nAll)/dAll, float64(nLast)/dLast)
+		log.Printf("created %d out of %d rows in %.3f seconds at %.0f rows/sec; instant speed %.0f rows/sec",
+			nAll, rowsTotal, dAll, float64(nAll)/dAll, float64(nLast)/dLast)
 		prevTime = t
 		nPrev = nAll
 	}
@@ -100,7 +118,25 @@ type work struct {
 	rowsCount      int
 }
 
+func (w *work) do(bw *bufio.Writer, r *rand.Rand) {
+	switch *format {
+	case "vmimport":
+		writeSeriesVMImport(bw, r, w.key, w.rowsCount, w.startTimestamp)
+	case "influx":
+		writeSeriesInflux(bw, r, w.key, w.rowsCount, w.startTimestamp)
+	default:
+		log.Fatalf("unexpected `-format=%q`. Supported values: vmimport, influx", *format)
+	}
+	atomic.AddUint64(&rowsGenerated, uint64(w.rowsCount))
+}
+
 func worker(workCh <-chan work) {
+	for w := range workCh {
+		workerSingleRequest(workCh, w)
+	}
+}
+
+func workerSingleRequest(workCh <-chan work, wk work) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequest("POST", *sink, pr)
 	if err != nil {
@@ -134,16 +170,14 @@ func worker(workCh <-chan work) {
 	}()
 	bw := bufio.NewWriterSize(w, 16*1024)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for w := range workCh {
-		switch *format {
-		case "vmimport":
-			writeSeriesVMImport(bw, r, w.key, w.rowsCount, w.startTimestamp)
-		case "influx":
-			writeSeriesInflux(bw, r, w.key, w.rowsCount, w.startTimestamp)
-		default:
-			log.Fatalf("unexpected `-format=%q`. Supported values: vmimport, influx", *format)
+	blocks := 0
+	wk.do(bw, r)
+	for wk = range workCh {
+		blocks++
+		if *blocksPerRequest > 0 && blocks >= *blocksPerRequest {
+			break
 		}
-		atomic.AddUint64(&rowsGenerated, uint64(w.rowsCount))
+		wk.do(bw, r)
 	}
 	_ = bw.Flush()
 	if *compress {
