@@ -171,13 +171,14 @@ func workerSingleRequest(workCh <-chan work, wk work) {
 	bw := bufio.NewWriterSize(w, 16*1024)
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	blocks := 0
-	wk.do(bw, r)
-	for wk = range workCh {
+	ok := true
+	for ok {
+		wk.do(bw, r)
 		blocks++
 		if *blocksPerRequest > 0 && blocks >= *blocksPerRequest {
 			break
 		}
-		wk.do(bw, r)
+		wk, ok = <-workCh
 	}
 	_ = bw.Flush()
 	if *compress {
