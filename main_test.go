@@ -37,9 +37,9 @@ func TestWriteSeriesInflux(t *testing.T) {
 		t.Fatalf("unexpected error in bw.Flush: %s", err)
 	}
 	result := bb.String()
-	resultExpected := `temperature value=68.34 61234000000
-temperature value=69.61 121234000000
-temperature value=69.86 181234000000
+	resultExpected := `temperature value=68.34 1234000000
+temperature value=69.61 61234000000
+temperature value=69.86 121234000000
 `
 	if result != resultExpected {
 		t.Fatalf("unexpected result;\ngot\n%s\nwant\n%s", result, resultExpected)

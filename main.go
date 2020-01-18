@@ -217,7 +217,7 @@ func writeSeriesInflux(bw *bufio.Writer, r *rand.Rand, sensorID, rowsCount int, 
 	var buf []byte
 	for i := 0; i < rowsCount; i++ {
 		t := generateTemperature(r, min, e)
-		timestamp := (startTimestamp + int64(i+1)*60*1000) * 1e6
+		timestamp := (startTimestamp + int64(i)*60*1000) * 1e6
 		buf = append(buf[:0], "temperature value="...)
 		buf = strconv.AppendFloat(buf, t, 'f', *digits, 64)
 		buf = append(buf, ' ')
