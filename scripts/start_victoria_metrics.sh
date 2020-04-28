@@ -1,4 +1,4 @@
-VERSION=v1.32.5
+VERSION=v1.35.0
 ARCHIVE=victoria-metrics-$VERSION.tar.gz
 
 test -f $ARCHIVE || curl -L https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/$VERSION/$ARCHIVE > $ARCHIVE
